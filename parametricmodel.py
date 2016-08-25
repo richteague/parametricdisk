@@ -73,7 +73,9 @@ def getIsothermalDensity(zvals, sigma, scaleheight):
 # Get the CO parameterised CO abundance.
 def getCOAbundance(ygrid, dens, temp, n_gas=1e-4, n_ice=0.0, T_freeze=20., 
                    N_diss=1.3e21):
+    dens = np.where(np.isfinite(dens), dens, 0.0)
+    temp = np.where(np.isfinite(temp), temp, 0.0)
     N_H2 = np.array([np.trapz(dens[i:], x=ygrid[i:]*sc.au*100., axis=0) 
                      for i in range(ygrid.size)])
     return np.where(np.logical_and(temp > T_freeze, N_H2 > N_diss), 
-                    n_gas, n_ice)
+                    n_gas*dens, n_ice*dens)
