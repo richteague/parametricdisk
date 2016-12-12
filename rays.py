@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.constants as sc
-from parametricmodel import ppd
+from disk import ppd
 from scipy.ndimage.interpolation import map_coordinates
 
 class rays:
