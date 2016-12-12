@@ -61,8 +61,6 @@ class ppd:
             self.mirror_model()
         return
     
-    # Functions.
-    
     def mirror_array(self, array):
         """Mirror a single array. Include r=0 column and do 
         not duplicate z=0 column."""    
@@ -204,7 +202,6 @@ class ppd:
         ridx = np.interp(rpnts, self.rgrid, np.arange(self.rgrid.size))
         zidx = np.interp(zpnts, self.zgrid, np.arange(self.zgrid.size))
         return map_coordinates(parameter, [zpnts, rpnts], order=1, **kwargs)
-    
     
     @staticmethod
     def powerlaw(x, x0, a, b):
