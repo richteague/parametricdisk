@@ -204,21 +204,25 @@ class ppd:
         return np.where(shield <= ndiss, 1, 0)
 
     def interp(self, parameter, rpnts, zpnts, **kwargs):
-        """Interpolates the 2D array: parameter."""
-        if type(parameter) is str:
-            if parameter.lower() == 'temperature':
-                param = self.temperature
-            elif parameter.lower() == 'density':
-                param = self.density
-            elif parameter.lower() == 'abundance':
-                param = self.abundance
-            else:
-                raise ValueError('Unknown property.')
-        else:
-            param = parameter
+        """Interpolates the 2D array, parameter."""
+        param = self.interp_function(parameter)
         ridx = np.interp(rpnts, self.rgrid, np.arange(self.rgrid.size))
         zidx = np.interp(zpnts, self.zgrid, np.arange(self.zgrid.size))
         return map_coordinates(param, [zidx, ridx], **kwargs)
+
+    def interp_function(self, parameter):
+        """Return the correct array to interpolate."""
+        if type(parameter) is str:
+            if parameter.lower() == 'temperature':
+                return self.temperature
+            elif parameter.lower() == 'density':
+                return self.density
+            elif parameter.lower() == 'abundance':
+                return self.abundance
+            else:
+                raise ValueError('Unknown property.')
+        else:
+            return parameter
 
     def write_header(self, filename):
         """Write the model to a .h file for LIME."""

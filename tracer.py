@@ -3,7 +3,34 @@ import scipy.constants as sc
 from disk import ppd
 from scipy.ndimage.interpolation import map_coordinates
 
-class rays:
+class ray:
+    """Particular ray."""
+
+    def __init__(self, coords, model):
+        """Produce a ray by giving it the coordinates of the path."""
+        self.rpnts = coords[0]
+        self.zpnts = coords[1]
+        self._density = model.interp('density', self.rpnts, self.zpnts)
+        self._temperature = model.interp('temperature', self.rpnts, self.zpnts)
+        self._abundance = model.interp('abundance', self.rpnts, self.zpnts)
+        return
+
+    # Functions to easily calculate the density weighted averges.
+    @property
+    def temperature(self):
+        return self._temperature
+
+    @property
+    def density(self):
+        return self._density
+
+    @property
+    def abundance(self):
+        return self._abundance
+
+
+
+class tracer:
     """Trace rays through a disk model and return physical 
     properties along those rays."""
     
@@ -42,7 +69,7 @@ class rays:
         ray = {}
         ray['rpnts'] = coords[0]
         ray['zpnts'] = coords[1]
-        ray['density'] = self.model.interp(coords[0], coords[1], self.model.density)
-        ray['temperature'] = self.model.interp(coords[0], coords[1], self.model.temperature)
-        ray['abundance'] = self.model.interp(coords[0], coords[1], self.model.abundance)
+        ray['density'] = self.model.interp('density', coords[0], coords[1])
+        ray['temperature'] = self.model.interp('temperature', coords[0], coords[1])
+        ray['abundance'] = self.model.interp('abundance', coords[0], coords[1])
         return ray
