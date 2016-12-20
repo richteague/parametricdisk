@@ -169,6 +169,7 @@ class ppd:
         T -= np.log(self.get_temperature(rgrid, zgrid - self.dgrid))
         T /= 2. * self.dgrid * sc.au
         T = np.where(np.isfinite(T), T, 0.0)
+        
         cs = np.power(self.soundspeed(rgrid, zgrid), -2.)
         cs = np.where(np.isfinite(cs), cs, 0.0)
         grav = sc.G * self.mstar * zgrid * sc.au

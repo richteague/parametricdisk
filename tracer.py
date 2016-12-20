@@ -1,25 +1,31 @@
 import numpy as np
 import scipy.constants as sc
-from disk import ppd
 from scipy.ndimage.interpolation import map_coordinates
 
+###
 class ray:
     """Particular ray."""
 
     def __init__(self, coords, model):
-        """Produce a ray by giving it the coordinates of the path."""
-        self.rpnts = coords[0]
-        self.zpnts = coords[1]
-        self._density = model.interp('density', self.rpnts, self.zpnts)
-        self._temperature = model.interp('temperature', self.rpnts, self.zpnts)
-        self._abundance = model.interp('abundance', self.rpnts, self.zpnts)
+        self._rpnts = coords[0]
+        self._zpnts = coords[1]
+        self._density = model.interp('density', self._rpnts, self._zpnts, order=1, cval=0)
+        self._temperature = model.interp('temperature', self._rpnts, self._zpnts, order=1, cval=0)
+        self._abundance = model.interp('abundance', self._rpnts, self._zpnts, order=0, cval=0)
         return
-
-    # Functions to easily calculate the density weighted averges.
+        
+    @property
+    def zpnts(self):
+        return self._zpnts
+        
+    @property
+    def rpnts(self):
+        return self._rpnts
+        
     @property
     def temperature(self):
         return self._temperature
-
+    
     @property
     def density(self):
         return self._density
@@ -27,12 +33,21 @@ class ray:
     @property
     def abundance(self):
         return self._abundance
+        
+    @property
+    def weights(self):
+        n_mol = self._abundance * self._density
+        if sum(n_mol) == 0:
+            n_mol += np.random.rand(n_mol.size) * 1e-10
+        return n_mol
 
 
-
+###
 class tracer:
-    """Trace rays through a disk model and return physical 
-    properties along those rays."""
+    """
+    Trace rays through a disk model and return physical 
+    properties along those rays.
+    """
     
     def __init__(self, ppd_instance):
         self.model = ppd_instance
@@ -66,10 +81,4 @@ class tracer:
     
     def ray_trace(self, coords):
         """Returns a dictionary along the path."""
-        ray = {}
-        ray['rpnts'] = coords[0]
-        ray['zpnts'] = coords[1]
-        ray['density'] = self.model.interp('density', coords[0], coords[1])
-        ray['temperature'] = self.model.interp('temperature', coords[0], coords[1])
-        ray['abundance'] = self.model.interp('abundance', coords[0], coords[1])
-        return ray
+        return ray(coords, self.model)
