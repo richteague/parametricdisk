@@ -2,6 +2,7 @@ import numpy as np
 import scipy.constants as sc
 from scipy.ndimage.interpolation import map_coordinates
 
+
 class ppd:
 
     def __init__(self, r_c, T_mid, T_atm, q_mid, q_atm, gamma, **kwargs):
@@ -62,7 +63,7 @@ class ppd:
         self.dissociated = self.get_dissociated(self.ndiss)
         self.abundance = self.get_abundance(self.xgas, self.xice)
         if self.shape == 'full':
-            self.mirror_model()        
+            self.mirror_model()
         return
 
     def mirror_array(self, array):
@@ -126,13 +127,14 @@ class ppd:
 
     def soundspeed(self, rgrid, zgrid):
         """Soundspeed of the gas in [m/s]."""
-        return np.sqrt(sc.k * self.get_temperature(rgrid, zgrid) / self.mu / sc.m_p)
+        cs2 = sc.k * self.get_temperature(rgrid, zgrid) / self.mu / sc.m_p
+        return np.sqrt(cs2)
 
     def scaleheight(self, rgrid):
         """Pressure scale height of gas in [au]."""
         Tmid = self.temp_midplane(rgrid)
-        Hp = sc.k * Tmid * rgrid**3 * sc.au / self.mu / sc.m_p / sc.G / self.mstar
-        return np.sqrt(Hp)
+        Hp = sc.k * Tmid * rgrid**3 * sc.au / self.mu / sc.m_p
+        return np.sqrt(Hp / sc.G / self.mstar)
 
     def surfacedensity(self, r):
         """Surface density of gas [g / sqcm]."""
@@ -149,7 +151,7 @@ class ppd:
 
     def temp_atmosphere(self, r):
         """Returns the atmospheric temperature [K] at r [au]."""
-        temp =  self.powerlaw(r, self.r_c, self.T_atm, -self.q_atm)
+        temp = self.powerlaw(r, self.r_c, self.T_atm, -self.q_atm)
         return np.where(r >= self.r_min, temp, 0.0)
 
     def get_temperature(self, rgrid, zgrid):
@@ -164,12 +166,12 @@ class ppd:
         return np.where(zgrid[:, None] > zq[None, :], temp_atm[None, :], T)
 
     def get_density(self, rgrid, zgrid):
-        """Calculate the density [n(H2)] structure on the provided grid axes."""
+        """Calculate the n(H2) structure on the provided grid axes."""
         T = np.log(self.get_temperature(rgrid, zgrid + self.dgrid))
         T -= np.log(self.get_temperature(rgrid, zgrid - self.dgrid))
         T /= 2. * self.dgrid * sc.au
         T = np.where(np.isfinite(T), T, 0.0)
-        
+
         cs = np.power(self.soundspeed(rgrid, zgrid), -2.)
         cs = np.where(np.isfinite(cs), cs, 0.0)
         grav = sc.G * self.mstar * zgrid * sc.au
@@ -179,9 +181,9 @@ class ppd:
         rho = np.ones(T.shape)
         for i in range(0, rgrid.size):
             for j in range(1, zgrid.size):
-                rho[j,i] = np.log(rho[j-1,i])
-                rho[j,i] -= self.dgrid * sc.au * (grav[j,i] * cs[j,i] + T[j,i])
-                rho[j,i] = np.exp(rho[j,i])
+                rho[j, i] = np.log(rho[j-1, i])
+                rho[j, i] -= self.dgrid * sc.au * (grav[j, i] * cs[j, i] + T[j, i])
+                rho[j, i] = np.exp(rho[j, i])
         rho -= np.nanmin(rho)
         rho /= np.trapz(rho, zgrid * sc.au * 100., axis=0)
         rho *= self.surfacedensity(rgrid)[None, :]
@@ -227,7 +229,7 @@ class ppd:
 
     def write_header(self, filename):
         """Write the model to a .h file for LIME."""
-        
+
         # Flatten all the arrays to save.
         rpnts = self.rgrid[None, :] * np.ones(self.zgrid.size)[:, None]
         zpnts = np.ones(self.rgrid.size)[None, :] * self.zgrid[:, None]
@@ -236,7 +238,7 @@ class ppd:
         dflat = self.density.T.flatten()
         tflat = self.temperature.T.flatten()
         aflat = self.abundance.T.flatten()
-        
+
         # Remove any points outside the disk.
         disk = dflat != self.filldens
         rpnts = rpnts[disk]
@@ -244,18 +246,18 @@ class ppd:
         dflat = dflat[disk]
         tflat = tflat[disk]
         aflat = aflat[disk]
-        
+
         # Remove all points where z or r are negative.
         disk = np.logical_and(rpnts > 0, zpnts >= 0)
         rpnts = rpnts[disk]
         zpnts = zpnts[disk]
         dflat = dflat[disk]
         tflat = tflat[disk]
-        aflat = aflat[disk]        
-        
+        aflat = aflat[disk]
+
         # Change to LIME appropriate units.
         dflat *= 1e6
-        
+
         # Write the strings to a single file.
         arrays = [rpnts, zpnts, dflat, tflat, aflat]
         arraynames = ['c1arr', 'c2arr', 'dens', 'temp', 'abund']
