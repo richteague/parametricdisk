@@ -34,6 +34,10 @@ class ppd:
         self.tatmq = kwargs.get('tatmq', -0.4)
         self.nHpZq = kwargs.get('nHpZq', 4.)
         self.dfunc = kwargs.get('dfunc', 'gaussian').lower()
+        self.ndiss = kwargs.get('ndiss', 1.3e21)
+        self.tfreeze = kwargs.get('tfreeze', 20.)
+        self.xgas = kwargs.get('xgas', 1e-4)
+        self.xdep = kwargs.get('xdep', 1e-12)
 
         # Select the correct density functional form.
 
@@ -48,7 +52,7 @@ class ppd:
         # The grids, by default, are functions of the planet radius.
 
         self.rvals = kwargs.get('rvals',
-                                np.linspace(0.2, 5, 200) * self.rplanet)
+                                np.linspace(0.2, 10, 500) * self.rplanet)
         self.zvals = kwargs.get('zvals',
                                 np.linspace(0, 3.5, 100) * self.rplanet)
         self.tvals = kwargs.get('tvals',
@@ -79,6 +83,8 @@ class ppd:
         self.dens = np.squeeze([self.volumedensity(t, s)
                                 for t, s in zip(self.temp, self.sigm)])
         self.Hp = np.squeeze([self.scaleheight(t) for t in self.temp])
+        self.abun = np.squeeze([self.abundance(t, d)
+                                for t, d in zip(self.temp, self.dens)])
         return
 
     def radialpowerlaw(self, x0, q):
@@ -149,10 +155,12 @@ class ppd:
         rho /= np.sqrt(2. * np.pi) * Hp * sc.au * 100.
         return self.volumedensity_normalise(rho, sigma)
 
-    def abundance(self, dens, temp):
-        """Returns if molecules can survive."""
-
-        return
+    def abundance(self, temp, dens):
+        """Returns molecular abundance [wrt H2]."""
+        dz = abs(np.diff(self.zvals).mean()) * sc.au * 1e2
+        col = np.cumsum(dens[::-1], axis=0)[::-1] * dz
+        abun = np.where(col > self.ndiss, self.xgas, self.xdep)
+        return np.where(temp > self.tfreeze, abun, self.xdep)
 
     def perturbation(self, r, t):
         """Perturbation function."""
@@ -176,3 +184,55 @@ class ppd:
         rwake = np.array([self.wakeradius(t + i * np.pi * 2)
                           for i in np.arange(-self.nwake, self.nwake)])
         return np.nanmin(abs(rwake - r))
+
+    def flatten(self, arr):
+        """Flatten array in way required for limepy."""
+        return arr.swapaxes(0, 2).swapaxes(0, 1).ravel()
+
+    def write_header(self, filename, clipdens=1e3):
+        """Write the model to a .h file for LIME."""
+
+        # Broadcast the points.
+        rpntflat = self.rvals[None, None, :] * np.ones(self.dens.shape)
+        zpntflat = self.zvals[None, :, None] * np.ones(self.dens.shape)
+        tpntflat = self.tvals[:, None, None] * np.ones(self.dens.shape)
+
+        # Flatten the arrays.
+        rpntflat = self.flatten(rpntflat)
+        zpntflat = self.flatten(zpntflat)
+        tpntflat = self.flatten(tpntflat)
+        densflat = self.flatten(self.dens)
+        tempflat = self.flatten(self.temp)
+        abunflat = self.flatten(self.abun)
+
+        # Remove low density points.
+        if clipdens is not None:
+            mask = densflat > clipdens
+            rpntflat = rpntflat[mask]
+            zpntflat = zpntflat[mask]
+            tpntflat = tpntflat[mask]
+            densflat = densflat[mask]
+            tempflat = tempflat[mask]
+            abunflat = abunflat[mask]
+
+        # Convert to LIME specific units.
+        densflat *= 1e6
+
+        # Write to the header file.
+        arrays = [rpntflat, zpntflat, tpntflat, densflat, tempflat, abunflat]
+        anames = ['c1arr', 'c2arr', 'c3arr', 'dens', 'temp', 'abund']
+        string = ''
+        for a, n in zip(arrays, anames):
+            string += self.write_header_string(a, n)
+        with open('%s' % filename.replace('.h', ''), 'w') as hfile:
+            hfile.write('%s' % string)
+        print 'Written to %s.h' % filename.replace('.h', '')
+        return
+
+    def write_header_string(self, array, name):
+        """Returns a string of the array to save."""
+        tosave = 'const static double %s[%d] = {' % (name, array.size)
+        for val in array:
+            tosave += '%.3e, ' % val
+        tosave = tosave[:-2] + '};\n'
+        return tosave
