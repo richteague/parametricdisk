@@ -26,6 +26,7 @@ class ppd:
         self.rplanet = kwargs.get('rplanet', 10.)
         self.tplanet = kwargs.get('tplanet', 0.0)
         self.rval0 = kwargs.get('rval0', self.rplanet)
+        self.redge = kwargs.get('redge', 5 * self.rplanet)
         self.sigm0 = kwargs.get('sigm0', 15.)
         self.sigmq = kwargs.get('sigmq', -1.)
         self.tmid0 = kwargs.get('tmid0', 20.)
@@ -51,7 +52,7 @@ class ppd:
 
         # The grids, by default, are functions of the planet radius.
 
-        self.rvals = kwargs.get('rvals', np.linspace(0.2, 10, 200))
+        self.rvals = kwargs.get('rvals', np.linspace(0.2, 7, 200))
         self.rvals *= self.rplanet
         self.zvals = kwargs.get('zvals', np.linspace(0, 3.5, 100))
         self.zvals *= self.rplanet
@@ -92,7 +93,9 @@ class ppd:
 
     def surfacedensity(self, pert=0.0):
         """Surface density in [g / cm^2]."""
-        return self.radialpowerlaw(self.sigm0, self.sigmq) * (1.0 + pert)
+        sigm = self.radialpowerlaw(self.sigm0, self.sigmq)
+        sigm *= np.exp(-1.0 * np.power(self.rvals / self.redge, 2.-self.sigmq))
+        return sigm * (1.0 + pert)
 
     def midplanetemp(self, pert=0.0):
         """Midplane temperature in [K]."""
@@ -220,7 +223,7 @@ class ppd:
         # Removing points outside the allowed theta range (-pi, pi).
         if zpntflat.min() < np.pi:
             print('Removing theta values less than negative pi.')
-            mask = np.array([t >= -np.pi for t in tpntflat])
+            mask = np.array([t > -np.pi for t in tpntflat])
             rpntflat = rpntflat[mask]
             zpntflat = zpntflat[mask]
             tpntflat = tpntflat[mask]
