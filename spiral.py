@@ -33,7 +33,7 @@ class ppd:
         self.tmidq = kwargs.get('tmidq', -0.4)
         self.tatmq = kwargs.get('tatmq', -0.4)
         self.nHpZq = kwargs.get('nHpZq', 4.)
-        self.dfunc = kwargs.get('dfunc', 'gaussian').lower()
+        self.dfunc = kwargs.get('dfunc', 'hydrostatic').lower()
         self.ndiss = kwargs.get('ndiss', 1.3e21)
         self.tfreeze = kwargs.get('tfreeze', 20.)
         self.xgas = kwargs.get('xgas', 1e-4)
@@ -51,12 +51,11 @@ class ppd:
 
         # The grids, by default, are functions of the planet radius.
 
-        self.rvals = kwargs.get('rvals',
-                                np.linspace(0.2, 10, 500) * self.rplanet)
-        self.zvals = kwargs.get('zvals',
-                                np.linspace(0, 3.5, 100) * self.rplanet)
-        self.tvals = kwargs.get('tvals',
-                                np.linspace(-np.pi, np.pi, 360))
+        self.rvals = kwargs.get('rvals', np.linspace(0.2, 10, 200))
+        self.rvals *= self.rplanet
+        self.zvals = kwargs.get('zvals', np.linspace(0, 3.5, 100))
+        self.zvals *= self.rplanet
+        self.tvals = kwargs.get('tvals', np.linspace(-np.pi, np.pi, 180))
 
         # Properties to define the wake, see Juhasz et al. (2015) for more.
 
@@ -189,7 +188,7 @@ class ppd:
         """Flatten array in way required for limepy."""
         return arr.swapaxes(0, 2).swapaxes(0, 1).ravel()
 
-    def write_header(self, filename, clipdens=1e3):
+    def write_header(self, filename, clipdens=1e3, resample=1):
         """Write the model to a .h file for LIME."""
 
         # Broadcast the points.
@@ -204,16 +203,32 @@ class ppd:
         densflat = self.flatten(self.dens)
         tempflat = self.flatten(self.temp)
         abunflat = self.flatten(self.abun)
+        print('Model has %d points.' % len(rpntflat))
 
         # Remove low density points.
         if clipdens is not None:
-            mask = densflat > clipdens
+            print('Removing low density points...')
+            mask = np.array([d >= clipdens for d in densflat])
             rpntflat = rpntflat[mask]
             zpntflat = zpntflat[mask]
             tpntflat = tpntflat[mask]
             densflat = densflat[mask]
             tempflat = tempflat[mask]
             abunflat = abunflat[mask]
+            print('%d points remain.' % len(rpntflat))
+
+        # Resample theta if appropriate.
+        if resample is not None and resample > 1:
+            print('Resample the theta axis...')
+            tokeep = self.tvals[::int(resample)]
+            mask = np.array([t in tokeep for t in tpntflat])
+            rpntflat = rpntflat[mask]
+            zpntflat = zpntflat[mask]
+            tpntflat = tpntflat[mask]
+            densflat = densflat[mask]
+            tempflat = tempflat[mask]
+            abunflat = abunflat[mask]
+            print('%d points remain.' % len(rpntflat))
 
         # Convert to LIME specific units.
         densflat *= 1e6
@@ -223,13 +238,13 @@ class ppd:
         anames = ['c1arr', 'c2arr', 'c3arr', 'dens', 'temp', 'abund']
         string = ''
         for a, n in zip(arrays, anames):
-            string += self.write_header_string(a, n)
-        with open('%s' % filename.replace('.h', ''), 'w') as hfile:
+            string += self._write_header_string(a, n)
+        with open('%s.h' % filename.replace('.h', ''), 'w') as hfile:
             hfile.write('%s' % string)
         print 'Written to %s.h' % filename.replace('.h', '')
         return
 
-    def write_header_string(self, array, name):
+    def _write_header_string(self, array, name):
         """Returns a string of the array to save."""
         tosave = 'const static double %s[%d] = {' % (name, array.size)
         for val in array:

@@ -120,9 +120,13 @@ class ppd:
 
     def get_grids(self):
         """Returns the r and z grids which things are calculated."""
-        rgrid = np.arange(self.dgrid, self.r_c * self.r_max + self.dgrid, self.dgrid)
+        rgrid = np.arange(self.dgrid,
+                          self.r_c * self.r_max + self.dgrid,
+                          self.dgrid)
         zmax = self.scaleheight(rgrid[1:]).max()
-        zgrid = np.arange(0, zmax * self.z_max + self.dgrid, self.dgrid)
+        zgrid = np.arange(0,
+                          zmax * self.z_max + self.dgrid,
+                          self.dgrid)
         return rgrid, zgrid
 
     def soundspeed(self, rgrid, zgrid):
@@ -174,8 +178,8 @@ class ppd:
 
         cs = np.power(self.soundspeed(rgrid, zgrid), -2.)
         cs = np.where(np.isfinite(cs), cs, 0.0)
-        grav = sc.G * self.mstar * zgrid * sc.au
-        grav = grav[:, None] / np.hypot(rgrid[None, :] * sc.au, zgrid[:, None] * sc.au)**3.
+        grav = np.hypot(rgrid[None, :] * sc.au, zgrid[:, None] * sc.au)**3.
+        grav = sc.G * self.mstar * zgrid[:, None] * sc.au / grav
         grav = np.where(np.isfinite(grav), grav, 0.0)
         # TODO: Is there a way to speed this bit up?
         rho = np.ones(T.shape)
@@ -192,7 +196,8 @@ class ppd:
 
     def get_abundance(self, gas_abundance, ice_abundance):
         """Return the molecular abundance."""
-        return np.where(self.frozen + self.dissociated == 0, gas_abundance, ice_abundance)
+        isgas = np.array(self.frozen + self.dissociated == 0)
+        return np.where(isgas, gas_abundance, ice_abundance)
 
     def get_frozen(self, freezeout_temp):
         """Return boolean of if the molecule is frozen."""
@@ -202,7 +207,7 @@ class ppd:
         """Return a boolean of if the molecule is shielded."""
         shield = [[np.trapz(self.density[j:, i], self.zgrid[j:]*sc.au*100.)
                   for i in range(self.rgrid.size)]
-                 for j in range(self.zgrid.size)]
+                  for j in range(self.zgrid.size)]
         shield = np.array(shield)
         return np.where(shield <= ndiss, 1, 0)
 
