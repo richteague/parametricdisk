@@ -217,6 +217,29 @@ class ppd:
             abunflat = abunflat[mask]
             print('%d points remain.' % len(rpntflat))
 
+        # Removing points outside the allowed theta range (-pi, pi).
+        if zpntflat.min() < np.pi:
+            print('Removing theta values less than negative pi.')
+            mask = np.array([t > -np.pi for t in tpntflat])
+            rpntflat = rpntflat[mask]
+            zpntflat = zpntflat[mask]
+            tpntflat = tpntflat[mask]
+            densflat = densflat[mask]
+            tempflat = tempflat[mask]
+            abunflat = abunflat[mask]
+            print('%d points remain.' % len(rpntflat))
+
+        if zpntflat.min() > np.pi:
+            print('Removing theta values less than negative pi.')
+            mask = np.array([t < np.pi for t in tpntflat])
+            rpntflat = rpntflat[mask]
+            zpntflat = zpntflat[mask]
+            tpntflat = tpntflat[mask]
+            densflat = densflat[mask]
+            tempflat = tempflat[mask]
+            abunflat = abunflat[mask]
+            print('%d points remain.' % len(rpntflat))
+
         # Resample theta if appropriate.
         if resample is not None and resample > 1:
             print('Resample the theta axis...')
