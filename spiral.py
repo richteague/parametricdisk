@@ -220,7 +220,7 @@ class ppd:
         # Removing points outside the allowed theta range (-pi, pi).
         if zpntflat.min() < np.pi:
             print('Removing theta values less than negative pi.')
-            mask = np.array([t > -np.pi for t in tpntflat])
+            mask = np.array([t >= -np.pi for t in tpntflat])
             rpntflat = rpntflat[mask]
             zpntflat = zpntflat[mask]
             tpntflat = tpntflat[mask]
