@@ -1,13 +1,20 @@
 """
-A protoplanetary disk with a perturbation in the midplane temperature, the
-surface density or both. The overall model is a reimplementation of the
-Williams and Best (2014) model. The perturbation is from Juhasz et al (2015)
-which uses the wake equation of Rafikov (2002).
+A standard protoplanetary disk model following the likes of Williams and Best
+(2014). There are two ways to play with the flaring, either through the
+temperature structure or the density structure.
+
+Temperautre method: using the parameters 'Htmp0' and 'Htmpq' to describe the
+transition between the atmospheric temperature and midplane temperature as a
+power-law as done in Rosenfeld et al. (2013). If this are both not set, it will
+revert to assuming this occurs at four pressure scale heights.
+
+Density method: use the parameters 'Hdns0' and 'Hdnsq' to describe the scale
+height of the disk as a power-law, akin to Trapmann et al. (2017). This
+requires dfunc = 'gaussian' otherwise these parameters are ignored.
 """
 
 import numpy as np
 import scipy.constants as sc
-from scipy.interpolate import interp1d
 
 
 class ppd:
@@ -16,29 +23,26 @@ class ppd:
     mu = 2.35           # Mean molecular weight.
 
     def __init__(self, **kwargs):
-        """Protoplanetary disk with a spiral perturbation."""
-
-        # Star, planet and disk values. By default the reference radius is the
-        # planetary radius.
+        """Protoplanetary disk model."""
 
         self.mstar = kwargs.get('mstar', 1.0)
-        self.mplanet = kwargs.get('mplanet', 1e-3)
-        self.rplanet = kwargs.get('rplanet', 10.)
-        self.tplanet = kwargs.get('tplanet', 0.0)
-        self.rval0 = kwargs.get('rval0', self.rplanet)
-        self.redge = kwargs.get('redge', 5 * self.rplanet)
+        self.rval0 = kwargs.get('rval0', 200.)
         self.sigm0 = kwargs.get('sigm0', 15.)
         self.sigmq = kwargs.get('sigmq', -1.)
         self.tmid0 = kwargs.get('tmid0', 20.)
-        self.tatm0 = kwargs.get('tatm0', 100.)
-        self.tmidq = kwargs.get('tmidq', -0.4)
-        self.tatmq = kwargs.get('tatmq', -0.4)
-        self.nHpZq = kwargs.get('nHpZq', 4.)
+        self.tatm0 = kwargs.get('tatm0', 90.)
+        self.tmidq = kwargs.get('tmidq', -0.3)
+        self.tatmq = kwargs.get('tatmq', -0.3)
+        self.Htmp0 = kwargs.get('Htmp0', None)
+        self.Htmpq = kwargs.get('Htmpq', None)
+        self.Hdns0 = kwargs.get('Hdns0', None)
+        self.Hdnsq = kwargs.get('Hdnsq', None)
         self.dfunc = kwargs.get('dfunc', 'hydrostatic').lower()
         self.ndiss = kwargs.get('ndiss', 1.3e21)
         self.tfreeze = kwargs.get('tfreeze', 20.)
         self.xgas = kwargs.get('xgas', 1e-4)
         self.xdep = kwargs.get('xdep', 1e-12)
+        self.rin = kwargs.get('rin', 0.0)
 
         # Select the correct density functional form.
 
@@ -50,56 +54,52 @@ class ppd:
             else:
                 self.volumedensity = self.volumedensity_hydrostatic
 
-        # The grids, by default, are functions of the planet radius.
+        # Check the values describing the flaring.
 
-        self.rvals = kwargs.get('rvals', np.linspace(0.2, 7, 200))
-        self.rvals *= self.rplanet
-        self.zvals = kwargs.get('zvals', np.linspace(0, 3.5, 100))
-        self.zvals *= self.rplanet
-        self.tvals = kwargs.get('tvals', np.linspace(-np.pi, np.pi, 180))
+        flag = False
+        if all([self.Htmp0 is not None, self.Htmpq is not None]):
+            print("Will used modified temperature structure.")
+            flag = True
+        if all([self.Hdns0 is not None, self.Hdnsq is not None]):
+            if flag:
+                raise ValueError("All four scale height parameters set.")
+            if self.dfunc == 'gaussian':
+                print("Will use user-controlled density scale heights.")
+            else:
+                print("Must set 'dfunc' to 'gaussian' to use 'Hdns' params.")
 
-        # Properties to define the wake, see Juhasz et al. (2015) for more.
+        # The grids, by default, are functions of the characteristic radius.
 
-        self.dT = kwargs.get('dT', 0.0)
-        self.dS = kwargs.get('dS', 0.0)
-        self.waked = kwargs.get('waked', 0.8)
-        self.wakeq = kwargs.get('wakeq', -1.7)
-        self.alpha = 1.5
-        self.beta = -0.5 * self.tmidq
-        self.wakeradius = interp1d(self.waketheta(), self.rvals,
-                                   bounds_error=False)
-        self.nwake = np.ceil(max(abs(self.wakeradius.x.max() / 2. / np.pi),
-                             self.wakeradius.x.max() / 2. / np.pi))
+        self.nrpnts = kwargs.get('nr', 100)
+        self.nzpnts = kwargs.get('nz', 100)
+        self.rvals = kwargs.get('rvals', np.linspace(0.1, 5, self.nrpnts))
+        self.rvals *= self.rval0
+        self.zvals = kwargs.get('zvals', np.linspace(0, 5, self.nzpnts))
+        self.zvals *= self.rval0
 
         # Build the disk model.
-        self.pert = np.squeeze([[self.perturbation(r, t) for r in self.rvals]
-                                for t in self.tvals])
-        self.sigm = np.squeeze([self.surfacedensity(self.dS * p)
-                                for p in self.pert])
-        self.tmid = np.squeeze([self.midplanetemp(self.dT * p)
-                                for p in self.pert])
-        self.temp = np.squeeze([self.temperature(t)
-                                for t in self.tmid])
-        self.dens = np.squeeze([self.volumedensity(t, s)
-                                for t, s in zip(self.temp, self.sigm)])
-        self.Hp = np.squeeze([self.scaleheight(t) for t in self.temp])
-        self.abun = np.squeeze([self.abundance(t, d)
-                                for t, d in zip(self.temp, self.dens)])
+        self.sigm = self.surfacedensity()
+        self.tmid = self.midplanetemp()
+        self.tatm = self.atmospheretemp()
+        self.temp = self.temperature()
+        self.dens = self.volumedensity()
+        self.Hp = self.scaleheight()
+        self.abun = self.abundance()
         return
 
     def radialpowerlaw(self, x0, q):
         """Radial power law."""
         return x0 * np.power(self.rvals / self.rval0, q)
 
-    def surfacedensity(self, pert=0.0):
+    def surfacedensity(self):
         """Surface density in [g / cm^2]."""
         sigm = self.radialpowerlaw(self.sigm0, self.sigmq)
-        sigm *= np.exp(-1.0 * np.power(self.rvals / self.redge, 2.-self.sigmq))
-        return sigm * (1.0 + pert)
+        sigm *= np.exp(self.radialpowerlaw(-1.0, 2.+self.sigmq))
+        return np.where(self.rvals >= self.rin, sigm, 0.0)
 
-    def midplanetemp(self, pert=0.0):
+    def midplanetemp(self):
         """Midplane temperature in [K]."""
-        return self.radialpowerlaw(self.tmid0, self.tmidq) * (1.0 + pert)
+        return self.radialpowerlaw(self.tmid0, self.tmidq)
 
     def atmospheretemp(self):
         """Atmospheric temperature in [K]."""
@@ -107,17 +107,30 @@ class ppd:
 
     def scaleheight(self, tmid=None):
         """Pressure scale height in [au]."""
+        if self.dfunc == 'gaussian':
+            if self.Hdns0 is not None and self.Hdnsq is not None:
+                return self.radialpowerlaw(self.Hdns0, self.Hdnsq)
+            elif any([self.Hdns0 is not None, self.Hdnsq is not None]):
+                print("Both 'Hdns0' and 'Hdnsq' must be set.")
+                print("Reverting to pressure scale height.")
         if tmid is None:
             tmid = self.midplanetemp()
         Hp = sc.k * tmid * np.power(self.rvals, 3) / self.mu / sc.m_p
         return np.sqrt(Hp * sc.au / sc.G / self.mstar / self.msun)
 
-    def temperature(self, tmid=None):
+    def temperature(self, tmid=None, tatm=None):
         """Gas temperature in [K]."""
         if tmid is None:
-            tmid = self.midplanetemp()
-        tatm = self.atmospheretemp()
-        zq = self.nHpZq * self.scaleheight(tmid)
+            tmid = self.tmid
+        if tatm is None:
+            tatm = self.tatm
+        if all([self.Htmp0 is not None, self.Htmpq is not None]):
+            zq = self.radialpowerlaw(self.Htmp0, self.Htmpq)
+        else:
+            zq = 4 * self.scaleheight(tmid=tmid)
+        if any([self.Htmp0 is not None, self.Htmpq is not None]):
+            print("Both 'Htmp0' and 'Htmpq' must be set.")
+            print("Reverting to Zq is four pressure scale heights.")
         temp = np.sin(np.pi * self.zvals[:, None] / 2. / zq[None, :])**2
         temp = temp * (tatm - tmid)[None, :] + tmid[None, :]
         return np.where(self.zvals[:, None] > zq[None, :], tatm[None, :], temp)
@@ -128,14 +141,20 @@ class ppd:
             temp = self.temperature()
         return np.sqrt(sc.k * temp / self.mu / sc.m_p)
 
-    def volumedensity_normalise(self, rho, sigma):
+    def volumedensity_normalise(self, rho, sigma=None):
         """Normalised the density profile."""
+        if sigma is None:
+            sigma = self.sigm
         rho *= sigma[None, :] / np.trapz(rho, self.zvals * sc.au * 100, axis=0)
         rho /= self.mu * sc.m_p * 1e3
         return np.where(np.logical_and(np.isfinite(rho), rho >= 0.0), rho, 0.0)
 
-    def volumedensity_hydrostatic(self, temp, sigma):
+    def volumedensity_hydrostatic(self, temp=None, sigma=None):
         """Hydrostatic density distribution [/cm^3]."""
+        if temp is None:
+            temp = self.temp
+        if sigma is None:
+            sigma = self.sigm
         dT = np.diff(np.log(temp), axis=0)
         dT = np.vstack((dT, dT[-1]))
         dz = np.diff(self.zvals * sc.au)
@@ -150,42 +169,29 @@ class ppd:
                 rho[j, i] = np.exp(np.log(rho[j-1, i]) - drho[j, i])
         return self.volumedensity_normalise(rho, sigma)
 
-    def volumedensity_gaussian(self, temp, sigma):
+    def volumedensity_gaussian(self, temp=None, sigma=None):
         """Gaussian density distribution [/cm^3]."""
+        if temp is None:
+            temp = self.temp
+        if sigma is None:
+            sigma = self.sigm
         Hp = self.scaleheight(temp[abs(self.zvals).argmin()])
         rho = np.exp(-0.5 * (self.zvals[:, None] / Hp[None, :])**2)
         rho /= np.sqrt(2. * np.pi) * Hp * sc.au * 100.
         return self.volumedensity_normalise(rho, sigma)
 
-    def abundance(self, temp, dens):
+    def abundance(self, temp=None, dens=None):
         """Returns molecular abundance [wrt H2]."""
+        if temp is None:
+            temp = self.temp
+        if dens is None:
+            dens = self.dens
         dz = abs(np.diff(self.zvals).mean()) * sc.au * 1e2
         col = np.cumsum(dens[::-1], axis=0)[::-1] * dz
         abun = np.where(col > self.ndiss, self.xgas, self.xdep)
         return np.where(temp > self.tfreeze, abun, self.xdep)
 
-    def perturbation(self, r, t):
-        """Perturbation function."""
-        dA = np.power(r / self.rplanet, np.sign(r - self.rplanet) * self.wakeq)
-        dA *= np.exp(-1 * np.power(self.wakedistance(r, t) / self.waked, 2))
-        return dA
-
-    def waketheta(self):
-        """Position angle of the wake at radius r."""
-        sgn = np.sign(self.rvals - self.rplanet)
-        a = sgn * self.rvals / self.scaleheight()
-        b = np.power(self.rvals / self.rplanet, -self.alpha)
-        b /= (1. - self.alpha + self.beta)
-        b = 1. / (1. + self.beta) - b
-        c = 1. / (1. + self.beta)
-        c -= 1. / (1. - self.alpha + self.beta)
-        return self.tplanet - a * (self.radialpowerlaw(b, 1 + self.beta) - c)
-
-    def wakedistance(self, r, t):
-        """Radial distance [au] to the nearest wake."""
-        rwake = np.array([self.wakeradius(t + i * np.pi * 2)
-                          for i in np.arange(-self.nwake, self.nwake)])
-        return np.nanmin(abs(rwake - r))
+    # Functions to write the model out to limepy or similar.
 
     def flatten(self, arr):
         """Flatten array in way required for limepy."""

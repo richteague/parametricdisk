@@ -186,7 +186,7 @@ class ppd:
         for i in range(0, rgrid.size):
             for j in range(1, zgrid.size):
                 rho[j, i] = np.log(rho[j-1, i])
-                rho[j, i] -= self.dgrid * sc.au * (grav[j, i] * cs[j, i] + T[j, i])
+                rho[j, i] -= self.dgrid * sc.au * (grav * cs + T)[j, i]
                 rho[j, i] = np.exp(rho[j, i])
         rho -= np.nanmin(rho)
         rho /= np.trapz(rho, zgrid * sc.au * 100., axis=0)
