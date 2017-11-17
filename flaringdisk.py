@@ -30,14 +30,15 @@ class ppd:
     def __init__(self, **kwargs):
         """Protoplanetary disk model."""
 
-        # Model grid.
+        # Model grid - cartesian grid.
         # Can specify the inner and outer radii with the number of grid points.
         # By default the grid will sample 500 points between [0, 7] * rval0 in
         # the radial direction and [0, 5] * rval0 in the vertical.
+        # TODO: Include the option to have logarithmic values.
 
         self.rval0 = kwargs.get('rval0', 35.)
         self.rmin = kwargs.get('rmin', 0.)
-        self.rmax = kwargs.get('rmax', 7. * self.rval0)
+        self.rmax = kwargs.get('rmax', 6. * self.rval0)
         self.nrpnts = kwargs.get('nr', 500)
         self.zmin = kwargs.get('zmin', 0.)
         self.zmax = kwargs.get('zmax', 5. * self.rval0)
@@ -53,19 +54,18 @@ class ppd:
 
         self.mstar = kwargs.get('mstar', 1.0)
 
-        # Surface density - self-similar solution.
-        # The {Hdns0, Hdnsq} parameters descibe the density scale height. If
-        # dfunc='gaussian' then this will set the scaleheight used for that.
-        # If none are specified, the pressure scale height is used by deafult.
+        # Surface density - assumes a self-similar solution. The
+        # normalisation of which can be controlled via either the 'sigm0'
+        # parameter or the 'mdisk' value. The former is in [g/cm^2] and the
+        # latter in [Msun]. Gaps can be added in as a list of lists. The gaps
+        # kwarg should be a list of gap descriptions:v[center, width, depth]
+        # where the centre and width are in [au], the depth relative to the
+        # unperturbed surface density. TODO: Check how many gaps are input.
 
         self.mdisk = kwargs.get('mdisk', None)
         self.sigm0 = kwargs.get('sigm0', 15.)
         self.sigmq = kwargs.get('sigmq', -1.)
-        self.Hdns0 = kwargs.get('Hdns0', None)
-        self.Hdnsq = kwargs.get('Hdnsq', None)
-        self.minH2 = kwargs.get('minH2', 0.0)
 
-        # Depending on which value is set, calculate the other.
         if self.mdisk is not None:
             q = (2. + self.sigmq)
             self.sigm0 = self.mdisk * q * self.msun * 1e3
@@ -77,18 +77,23 @@ class ppd:
             self.mdisk *= 2. * np.pi * np.power(self.rval0 * sc.au * 1e2, 2)
             self.mdisk *= np.exp(np.power(self.rvals[0] / self.rval0, q))
 
-        # By default the vertical structure is hydrostatic.
-
-        self.dfunc = kwargs.get('dfunc', 'hydrostatic').lower()
-        if self.dfunc not in ['gaussian', 'hydrostatic']:
-            raise ValueError("dfunc must be 'gaussian' or 'hydrostatic'.")
+        self.gaps = kwargs.get('gaps', None)
+        if self.gaps is not None:
+            self.gap_profile = []
+            for gap in self.gaps:
+                x0, dx, ds = gap[:3]
+                profile = self._gaussian(self.rvals, x0, dx, ds)
+                self.gap_profile += [1. - profile]
+            self.gap_profile = np.prod(self.gap_profile, axis=0)
         else:
-            if self.dfunc == 'gaussian':
-                self._calc_volumedensity = self._calc_volumedensity_gaussian
-            else:
-                self._calc_volumedensity = self._calc_volumedensity_hydrostatic
+            self.gap_profile = np.ones(self.nrpnts)
+        if self.gap_profile.shape != self.rvals.shape:
+            raise ValueError("Wrong gap profile shape.")
 
-        # Temperature - two layer approximation.
+        self.sigm = self._calc_surfacedensity() * self.gap_profile
+        self.mdisk = self._calc_mdisk()
+
+        # Temperature - two layer approximation from Dartois et al. (2013).
         # The {Htmp0, Htmpq} values describe the transition between the
         # midplane and atmospheric temperature regime. By default, this will
         # use Zq = 4Hp, where Hp is the pressure scale height.
@@ -100,34 +105,15 @@ class ppd:
         self.Htmp0 = kwargs.get('Htmp0', None)
         self.Htmpq = kwargs.get('Htmpq', None)
 
-        # CO distribution.
-        # TODO: Implement radial variations in x(CO).
+        # Volume density - by default the vertical structure is hydrostatic.
+        # The {Hdns0, Hdnsq} parameters descibe the density scale height. If
+        # dfunc='gaussian' then this will set the scaleheight used for that.
+        # If none are specified, the pressure scale height is used by deafult.
+        # A minimum density can be set, useful for trimming large models.
 
-        self.xgas = kwargs.get('xgas', 1e-4)
-        self.xdep = kwargs.get('xdep', 1e-8)
-        self.ndiss = kwargs.get('ndiss', 1.3e21)
-        self.tfreeze = kwargs.get('tfreeze', 20.)
-
-        # Radiative transfer.
-
-        self.molecule = kwargs.get('molecule', 'CO').lower()
-        self.rates = ratefile('%s%s.dat' % (self.rates_path, self.molecule))
-        self.vturb = kwargs.get('vturb', 0.0)
-
-        # Rotation velocity.
-        # By default just Keplerian rotation including the height above the
-        # midplane. Optionally can include the disk mass in the central mass
-        # calculation, or the pressure support.
-
-        self.incl_altitude = kwargs.get('incl_altitude', True)
-        self.incl_diskmass = kwargs.get('incl_diskmass', False)
-        self.incl_pressure = kwargs.get('incl_pressure', False)
-
-        # Others.
-
-        self.verbose = kwargs.get('verbose', False)
-
-        # Check the values describing the flaring.
+        self.Hdns0 = kwargs.get('Hdns0', None)
+        self.Hdnsq = kwargs.get('Hdnsq', None)
+        self.minH2 = kwargs.get('minH2', 0.0)
 
         flag = False
         if self.Htmp0 is not None and self.Htmpq is not None:
@@ -136,18 +122,51 @@ class ppd:
             if flag:
                 raise ValueError("All four scale height parameters set.")
 
-        # Build the disk model.
+        self.dfunc = kwargs.get('dfunc', 'hydrostatic').lower()
+        if self.dfunc not in ['gaussian', 'hydrostatic']:
+            raise ValueError("dfunc must be 'gaussian' or 'hydrostatic'.")
+        else:
+            if self.dfunc == 'gaussian':
+                self._calc_volumedensity = self._calc_volumedensity_gaussian
+            else:
+                self._calc_volumedensity = self._calc_volumedensity_hydrostatic
 
-        self.sigm = self._calc_surfacedensity()
         self.tmid = self._calc_midplanetemp()
         self.tatm = self._calc_atmospheretemp()
         self.temp = self._calc_temperature()
+
         self.dens = self._calc_volumedensity()
         self.Hp = self._calc_scaleheight()
+
+        # CO distribution. Assume that xgas is a radial function.
+
+        self.xgas = self._make_profile(kwargs.get('xgas', 1e-4))
+        self.xdep = self._make_profile(kwargs.get('xdep', 1e-8))
+        self.ndiss = kwargs.get('ndiss', 1.3e21)
+        self.tfreeze = kwargs.get('tfreeze', 19.)
+
         self.abun = self._calc_abundance()
         self.column = self._calc_columndensity()
+
+        # Radiative transfer.
+
+        self.molecule = kwargs.get('molecule', 'CO').lower()
+        self.rates = ratefile('%s%s.dat' % (self.rates_path, self.molecule))
+        self.vturb = kwargs.get('vturb', 0.0)
+
+        # Rotation velocity - by default just Keplerian rotation including the
+        # height above the midplane. Optionally can include the disk mass in
+        # the central mass calculation, or the pressure support.
+
+        self.incl_altitude = kwargs.get('incl_altitude', True)
+        self.incl_diskmass = kwargs.get('incl_diskmass', False)
+        self.incl_pressure = kwargs.get('incl_pressure', True)
+
         self.rotation = self._calc_rotation()
 
+        # Others.
+
+        self.verbose = kwargs.get('verbose', False)
         return
 
     def _calc_rotation(self):
@@ -179,9 +198,16 @@ class ppd:
         # Combined.
         return np.sqrt(vkep + vgrav + vpres)
 
+    def _gaussian(self, x, x0, dx, A=None):
+        """Gaussian function. If A is None, normalize it. dx is stdev."""
+        if A is None:
+            A = 1. / np.sqrt(2. * np.pi) / dx
+        return A * np.exp(-0.5 * np.power((x - x0) / dx, 2))
+
     def _calc_mdisk(self):
         """Return Mdisk in [Msun]."""
-        mdisk = np.trapz(self.sigm * self.rvals_cm, self.rvals_cm)
+        sigm = np.where(np.isfinite(self.sigm), self.sigm, 0.0)
+        mdisk = np.trapz(sigm * self.rvals_cm, self.rvals_cm)
         return 2. * np.pi * mdisk / 1e3 / self.msun
 
     def radialpowerlaw(self, x0, q):
@@ -207,7 +233,7 @@ class ppd:
         return self.radialpowerlaw(self.tatm0, self.tatmq)
 
     def _calc_scaleheight(self, tmid=None):
-        """Pressure scale height in [au]."""
+        """Scale height in [au]."""
         if self.dfunc == 'gaussian':
             if self.Hdns0 is not None and self.Hdnsq is not None:
                 return self.radialpowerlaw(self.Hdns0, self.Hdnsq)
@@ -292,8 +318,19 @@ class ppd:
             dens = self.dens
         dz = abs(np.diff(self.zvals).mean()) * sc.au * 1e2
         col = np.cumsum(dens[::-1], axis=0)[::-1] * dz
-        abun = self.xgas * np.where(col > self.ndiss, 1.0, self.xdep)
-        return abun * np.where(temp > self.tfreeze, 1.0, self.xdep)
+        mask = np.logical_and(col > self.ndiss, temp > self.tfreeze)
+        return np.where(mask, self.xgas[None, :], self.xdep[None, :])
+
+    def _sample_input(self, arr_y):
+        """Sample 'arr' across the model radius."""
+        arr_x = np.linspace(self.rmin, self.rmax, len(arr_y))
+        return np.interp(self.rvals, arr_x, arr_y)
+
+    def _make_profile(self, value):
+        """Make the input into a radial profile."""
+        if type(value) == float:
+            return np.array([value for _ in range(self.nrpnts)])
+        return self._sample_input(value)
 
     # Functions to do simple radiative transfer.
 
