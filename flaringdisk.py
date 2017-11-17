@@ -13,143 +13,247 @@ height of the disk as a power-law, akin to Trapmann et al. (2017). This
 requires dfunc = 'gaussian' otherwise these parameters are ignored.
 """
 
+import warnings
 import numpy as np
 import scipy.constants as sc
+from limepy.analysis.collisionalrates import ratefile
+warnings.filterwarnings('ignore')
 
 
 class ppd:
 
     msun = 1.988e30     # Stellar mass.
     mu = 2.35           # Mean molecular weight.
+    B0 = 5.7635968e10   # Rotational constant.
+    rates_path = '/Users/rteague/PythonPackages/limepy/aux/'
 
     def __init__(self, **kwargs):
         """Protoplanetary disk model."""
 
+        # Model grid.
+        # Can specify the inner and outer radii with the number of grid points.
+        # By default the grid will sample 500 points between [0, 7] * rval0 in
+        # the radial direction and [0, 5] * rval0 in the vertical.
+
+        self.rval0 = kwargs.get('rval0', 35.)
+        self.rmin = kwargs.get('rmin', 0.)
+        self.rmax = kwargs.get('rmax', 7. * self.rval0)
+        self.nrpnts = kwargs.get('nr', 500)
+        self.zmin = kwargs.get('zmin', 0.)
+        self.zmax = kwargs.get('zmax', 5. * self.rval0)
+        self.nzpnts = kwargs.get('nz', 500)
+        self.rvals = np.linspace(self.rmin, self.rmax, self.nrpnts)
+        self.zvals = np.linspace(self.zmin, self.zmax, self.nzpnts)
+        self.rvals_m = self.rvals * sc.au
+        self.zvals_m = self.zvals * sc.au
+        self.rvals_cm = self.rvals_m * 1e2
+        self.zvals_cm = self.zvals_m * 1e2
+
+        # System masses. In solar masses.
+
         self.mstar = kwargs.get('mstar', 1.0)
-        self.rval0 = kwargs.get('rval0', 200.)
+
+        # Surface density - self-similar solution.
+        # The {Hdns0, Hdnsq} parameters descibe the density scale height. If
+        # dfunc='gaussian' then this will set the scaleheight used for that.
+        # If none are specified, the pressure scale height is used by deafult.
+
+        self.mdisk = kwargs.get('mdisk', None)
         self.sigm0 = kwargs.get('sigm0', 15.)
         self.sigmq = kwargs.get('sigmq', -1.)
+        self.Hdns0 = kwargs.get('Hdns0', None)
+        self.Hdnsq = kwargs.get('Hdnsq', None)
+        self.minH2 = kwargs.get('minH2', 0.0)
+
+        # Depending on which value is set, calculate the other.
+        if self.mdisk is not None:
+            q = (2. + self.sigmq)
+            self.sigm0 = self.mdisk * q * self.msun * 1e3
+            self.sigm0 /= 2. * np.pi * np.power(self.rval0 * sc.au * 1e2, 2)
+            self.sigm0 /= np.exp(np.power(self.rvals[0] / self.rval0, q))
+        else:
+            q = (2. + self.sigmq)
+            self.mdisk = self.sigm0 / q / self.msun / 1e3
+            self.mdisk *= 2. * np.pi * np.power(self.rval0 * sc.au * 1e2, 2)
+            self.mdisk *= np.exp(np.power(self.rvals[0] / self.rval0, q))
+
+        # By default the vertical structure is hydrostatic.
+
+        self.dfunc = kwargs.get('dfunc', 'hydrostatic').lower()
+        if self.dfunc not in ['gaussian', 'hydrostatic']:
+            raise ValueError("dfunc must be 'gaussian' or 'hydrostatic'.")
+        else:
+            if self.dfunc == 'gaussian':
+                self._calc_volumedensity = self._calc_volumedensity_gaussian
+            else:
+                self._calc_volumedensity = self._calc_volumedensity_hydrostatic
+
+        # Temperature - two layer approximation.
+        # The {Htmp0, Htmpq} values describe the transition between the
+        # midplane and atmospheric temperature regime. By default, this will
+        # use Zq = 4Hp, where Hp is the pressure scale height.
+
         self.tmid0 = kwargs.get('tmid0', 20.)
         self.tatm0 = kwargs.get('tatm0', 90.)
         self.tmidq = kwargs.get('tmidq', -0.3)
         self.tatmq = kwargs.get('tatmq', -0.3)
         self.Htmp0 = kwargs.get('Htmp0', None)
         self.Htmpq = kwargs.get('Htmpq', None)
-        self.Hdns0 = kwargs.get('Hdns0', None)
-        self.Hdnsq = kwargs.get('Hdnsq', None)
-        self.dfunc = kwargs.get('dfunc', 'hydrostatic').lower()
+
+        # CO distribution.
+        # TODO: Implement radial variations in x(CO).
+
+        self.xgas = kwargs.get('xgas', 1e-4)
+        self.xdep = kwargs.get('xdep', 1e-8)
         self.ndiss = kwargs.get('ndiss', 1.3e21)
         self.tfreeze = kwargs.get('tfreeze', 20.)
-        self.xgas = kwargs.get('xgas', 1e-4)
-        self.xdep = kwargs.get('xdep', 1e-12)
-        self.rin = kwargs.get('rin', 0.0)
 
-        # Select the correct density functional form.
+        # Radiative transfer.
 
-        if self.dfunc not in ['gaussian', 'hydrostatic']:
-            raise ValueError("dfunc must be 'gaussian' or 'hydrostatic'.")
-        else:
-            if self.dfunc == 'gaussian':
-                self.volumedensity = self.volumedensity_gaussian
-            else:
-                self.volumedensity = self.volumedensity_hydrostatic
+        self.molecule = kwargs.get('molecule', 'CO').lower()
+        self.rates = ratefile('%s%s.dat' % (self.rates_path, self.molecule))
+        self.vturb = kwargs.get('vturb', 0.0)
+
+        # Rotation velocity.
+        # By default just Keplerian rotation including the height above the
+        # midplane. Optionally can include the disk mass in the central mass
+        # calculation, or the pressure support.
+
+        self.incl_altitude = kwargs.get('incl_altitude', True)
+        self.incl_diskmass = kwargs.get('incl_diskmass', False)
+        self.incl_pressure = kwargs.get('incl_pressure', False)
+
+        # Others.
+
+        self.verbose = kwargs.get('verbose', False)
 
         # Check the values describing the flaring.
 
         flag = False
-        if all([self.Htmp0 is not None, self.Htmpq is not None]):
-            print("Will used modified temperature structure.")
+        if self.Htmp0 is not None and self.Htmpq is not None:
             flag = True
-        if all([self.Hdns0 is not None, self.Hdnsq is not None]):
+        if self.Hdns0 is not None and self.Hdnsq is not None:
             if flag:
                 raise ValueError("All four scale height parameters set.")
-            if self.dfunc == 'gaussian':
-                print("Will use user-controlled density scale heights.")
-            else:
-                print("Must set 'dfunc' to 'gaussian' to use 'Hdns' params.")
-
-        # The grids, by default, are functions of the characteristic radius.
-
-        self.nrpnts = kwargs.get('nr', 100)
-        self.nzpnts = kwargs.get('nz', 100)
-        self.rvals = kwargs.get('rvals', np.linspace(0.1, 5, self.nrpnts))
-        self.rvals *= self.rval0
-        self.zvals = kwargs.get('zvals', np.linspace(0, 5, self.nzpnts))
-        self.zvals *= self.rval0
 
         # Build the disk model.
-        self.sigm = self.surfacedensity()
-        self.tmid = self.midplanetemp()
-        self.tatm = self.atmospheretemp()
-        self.temp = self.temperature()
-        self.dens = self.volumedensity()
-        self.Hp = self.scaleheight()
-        self.abun = self.abundance()
+
+        self.sigm = self._calc_surfacedensity()
+        self.tmid = self._calc_midplanetemp()
+        self.tatm = self._calc_atmospheretemp()
+        self.temp = self._calc_temperature()
+        self.dens = self._calc_volumedensity()
+        self.Hp = self._calc_scaleheight()
+        self.abun = self._calc_abundance()
+        self.column = self._calc_columndensity()
+        self.rotation = self._calc_rotation()
+
         return
+
+    def _calc_rotation(self):
+        """Calculate the azimuthal rotation velocity [m/s]."""
+
+        # Keplerian rotation.
+        if self.incl_altitude:
+            vkep = np.hypot(self.rvals_m[None, :], self.zvals_m[:, None])
+        else:
+            vkep = self.rvals_m[None, :] * np.ones(self.nzpnts)[:, None]
+        vkep = np.power(self.rvals_m, 2)[None, :] * np.power(vkep, -3)
+        vkep *= sc.G * self.mstar * self.msun
+
+        # Disk gravity component.
+        if self.incl_diskmass:
+            raise NotImplementedError()
+        else:
+            vgrav = 0.0
+
+        # Pressure gradient.
+        if self.incl_pressure:
+            n = self.dens * 1e6
+            P = n * sc.k * self.temp
+            dPdr = np.gradient(P, self.rvals_m, axis=1)
+            vpres = self.rvals_m[None, :] * dPdr / n / sc.m_p / self.mu
+        else:
+            vpres = 0.0
+
+        # Combined.
+        return np.sqrt(vkep + vgrav + vpres)
+
+    def _calc_mdisk(self):
+        """Return Mdisk in [Msun]."""
+        mdisk = np.trapz(self.sigm * self.rvals_cm, self.rvals_cm)
+        return 2. * np.pi * mdisk / 1e3 / self.msun
 
     def radialpowerlaw(self, x0, q):
         """Radial power law."""
         return x0 * np.power(self.rvals / self.rval0, q)
 
-    def surfacedensity(self):
+    def _calc_surfacedensity(self):
         """Surface density in [g / cm^2]."""
         sigm = self.radialpowerlaw(self.sigm0, self.sigmq)
         sigm *= np.exp(self.radialpowerlaw(-1.0, 2.+self.sigmq))
-        return np.where(self.rvals >= self.rin, sigm, 0.0)
+        return np.where(self.rvals >= self.rmin, sigm, 0.0)
 
-    def midplanetemp(self):
+    def _calc_columndensity(self):
+        """Column density of CO in [/cm^2]."""
+        return np.trapz(self.abun*self.dens, x=self.zvals*sc.au*1e2, axis=0)
+
+    def _calc_midplanetemp(self):
         """Midplane temperature in [K]."""
         return self.radialpowerlaw(self.tmid0, self.tmidq)
 
-    def atmospheretemp(self):
+    def _calc_atmospheretemp(self):
         """Atmospheric temperature in [K]."""
         return self.radialpowerlaw(self.tatm0, self.tatmq)
 
-    def scaleheight(self, tmid=None):
+    def _calc_scaleheight(self, tmid=None):
         """Pressure scale height in [au]."""
         if self.dfunc == 'gaussian':
             if self.Hdns0 is not None and self.Hdnsq is not None:
                 return self.radialpowerlaw(self.Hdns0, self.Hdnsq)
-            elif any([self.Hdns0 is not None, self.Hdnsq is not None]):
+        elif (self.Hdns0 is None) != (self.Hdnsq is None):
+            if self.verbose:
                 print("Both 'Hdns0' and 'Hdnsq' must be set.")
                 print("Reverting to pressure scale height.")
         if tmid is None:
-            tmid = self.midplanetemp()
+            tmid = self._calc_midplanetemp()
         Hp = sc.k * tmid * np.power(self.rvals, 3) / self.mu / sc.m_p
         return np.sqrt(Hp * sc.au / sc.G / self.mstar / self.msun)
 
-    def temperature(self, tmid=None, tatm=None):
+    def _calc_temperature(self, tmid=None, tatm=None):
         """Gas temperature in [K]."""
         if tmid is None:
             tmid = self.tmid
         if tatm is None:
             tatm = self.tatm
-        if all([self.Htmp0 is not None, self.Htmpq is not None]):
+        if (self.Htmp0 is None) != (self.Htmpq is None):
+            if self.verbose:
+                print("Both 'Htmp0' and 'Htmpq' must be set.")
+                print("Reverting to Zq is four pressure scale heights.")
+        if self.Htmp0 is not None and self.Htmpq is not None:
             zq = self.radialpowerlaw(self.Htmp0, self.Htmpq)
         else:
-            zq = 4 * self.scaleheight(tmid=tmid)
-        if any([self.Htmp0 is not None, self.Htmpq is not None]):
-            print("Both 'Htmp0' and 'Htmpq' must be set.")
-            print("Reverting to Zq is four pressure scale heights.")
-        temp = np.sin(np.pi * self.zvals[:, None] / 2. / zq[None, :])**2
-        temp = temp * (tatm - tmid)[None, :] + tmid[None, :]
-        return np.where(self.zvals[:, None] > zq[None, :], tatm[None, :], temp)
+            zq = 4 * self._calc_scaleheight(tmid=tmid)
+        T = np.cos(np.pi * self.zvals[:, None] / 2. / zq[None, :])**2
+        T = T * (tmid - tatm)[None, :] + tatm[None, :]
+        return np.where(self.zvals[:, None] >= zq[None, :], tatm[None, :], T)
 
-    def soundspeed(self, temp=None):
+    def _calc_soundspeed(self, temp=None):
         """Sound speed in [m/s]."""
         if temp is None:
-            temp = self.temperature()
+            temp = self._calc_temperature()
         return np.sqrt(sc.k * temp / self.mu / sc.m_p)
 
-    def volumedensity_normalise(self, rho, sigma=None):
+    def _calc_volumedensity_normalise(self, rho, sigma=None):
         """Normalised the density profile."""
         if sigma is None:
             sigma = self.sigm
-        rho *= sigma[None, :] / np.trapz(rho, self.zvals * sc.au * 100, axis=0)
-        rho /= self.mu * sc.m_p * 1e3
-        return np.where(np.logical_and(np.isfinite(rho), rho >= 0.0), rho, 0.0)
+        rho *= sigma[None, :] / np.trapz(rho, self.zvals_cm, axis=0)
+        rho /= self.mu * sc.m_p * 2e3
+        mask = np.logical_and(np.isfinite(rho), rho >= self.minH2)
+        return np.where(mask, rho, 0.0)
 
-    def volumedensity_hydrostatic(self, temp=None, sigma=None):
+    def _calc_volumedensity_hydrostatic(self, temp=None, sigma=None):
         """Hydrostatic density distribution [/cm^3]."""
         if temp is None:
             temp = self.temp
@@ -159,7 +263,7 @@ class ppd:
         dT = np.vstack((dT, dT[-1]))
         dz = np.diff(self.zvals * sc.au)
         dz = np.hstack((dz, dz[-1]))
-        cs = dz[:, None] * np.power(self.soundspeed(temp), -2.)[None, :]
+        cs = dz[:, None] * np.power(self._calc_soundspeed(temp), -2.)[None, :]
         G = (np.hypot(self.rvals[None, :], self.zvals[:, None]) * sc.au)**3
         G = sc.G * self.mstar * self.msun * self.zvals[:, None] * sc.au / G
         drho = np.squeeze(dT + cs * G)
@@ -167,20 +271,20 @@ class ppd:
         for i in range(self.rvals.size):
             for j in range(1, self.zvals.size):
                 rho[j, i] = np.exp(np.log(rho[j-1, i]) - drho[j, i])
-        return self.volumedensity_normalise(rho, sigma)
+        return self._calc_volumedensity_normalise(rho, sigma)
 
-    def volumedensity_gaussian(self, temp=None, sigma=None):
+    def _calc_volumedensity_gaussian(self, temp=None, sigma=None):
         """Gaussian density distribution [/cm^3]."""
         if temp is None:
             temp = self.temp
         if sigma is None:
             sigma = self.sigm
-        Hp = self.scaleheight(temp[abs(self.zvals).argmin()])
+        Hp = self._calc_scaleheight(temp[abs(self.zvals).argmin()])
         rho = np.exp(-0.5 * (self.zvals[:, None] / Hp[None, :])**2)
         rho /= np.sqrt(2. * np.pi) * Hp * sc.au * 100.
-        return self.volumedensity_normalise(rho, sigma)
+        return self._calc_volumedensity_normalise(rho, sigma)
 
-    def abundance(self, temp=None, dens=None):
+    def _calc_abundance(self, temp=None, dens=None):
         """Returns molecular abundance [wrt H2]."""
         if temp is None:
             temp = self.temp
@@ -188,94 +292,141 @@ class ppd:
             dens = self.dens
         dz = abs(np.diff(self.zvals).mean()) * sc.au * 1e2
         col = np.cumsum(dens[::-1], axis=0)[::-1] * dz
-        abun = np.where(col > self.ndiss, self.xgas, self.xdep)
-        return np.where(temp > self.tfreeze, abun, self.xdep)
+        abun = self.xgas * np.where(col > self.ndiss, 1.0, self.xdep)
+        return abun * np.where(temp > self.tfreeze, 1.0, self.xdep)
+
+    # Functions to do simple radiative transfer.
+
+    def _calc_Nu(self, J=0):
+        """Return the column density in each cell of that level [/cm^2]."""
+        Eu = self.rates.lines[J+1].Eup
+        gu = self.rates.levels[J+2].g
+        abun = gu * self.abun * self.dens / self._calc_Qrot(self.temp)
+        dz = np.diff(self.zvals_cm)
+        dz = np.insert(dz, 0, dz[0])
+        return abun * np.exp(-Eu / self.temp) * dz[:, None]
+
+    def _calc_dV(self):
+        """Return the Doppler width of the line at each cell."""
+        vtherm = np.sqrt(2. * sc.k * self.temp / self.rates.mu / sc.m_p)
+        return np.hypot(vtherm, self.vturb)
+
+    def _calc_FWHM(self):
+        """Return the FWHM of the line at each cell."""
+        return 2. * np.sqrt(np.log(2.)) * self._calc_dV()
+
+    def _calc_tau(self, J=0):
+        """Return the optical depth of each cell for the given transition."""
+        Nu = self._calc_Nu(J=J) * 1e4
+        FWHM = self._calc_FWHM()
+        Au = self.rates.lines[J+1].A
+        nu = self.rates.lines[J+1].freq
+        tau = Nu * Au * sc.c**3 / 8. / np.pi / nu**3 / FWHM
+        return tau * (np.exp(sc.h * nu / sc.k / self.temp) - 1.)
+
+    def _calc_ctau(self, J=0):
+        """Return (1 - exp(-tau)) for each cell."""
+        tau = self._calc_tau(J=J)
+        return np.cumsum(tau[::-1], axis=0)[::-1]
+
+    def _calc_Tmb(self, J=0):
+        """Return the observed main beam temperature [K]."""
+        return self.temp * (1. - np.exp(-self._calc_ctau(J=J)))
+
+    def _calc_Qrot(self, T):
+        """Rotational parition function."""
+        return sc.k * T / sc.h / self.B0 + 1. / 3.
+
+    def _get_tau_indices(self, tau=1.0, J=0):
+        """Return the indices of the tau surface."""
+        ctau = self._calc_ctau(J=J)
+        idx = np.argmin(abs(ctau - np.ones(self.nrpnts) * tau), axis=0)
+        return np.where(ctau[0] > tau, idx, 0)
+
+    def tau_emission(self, tau=1.0, J=0):
+        """Return emission profile at the surface where tau is reached [K]."""
+        Tmb = self._calc_Tmb(J=J)
+        idxs = self._get_tau_indices(tau=tau, J=J)
+        return np.squeeze([Tmb[idx, i] for i, idx in enumerate(idxs)])
+
+    def tau_temperature(self, tau=1.0, J=0):
+        """Return the temperature at the tau surface [K]."""
+        idxs = self._get_tau_indices(tau=tau, J=J)
+        return np.squeeze([self.temp[idx, i] for i, idx in enumerate(idxs)])
+
+    def tau_surface(self, tau=1.0, J=0):
+        """Return the height of the tau surface [au]."""
+        idxs = self._get_tau_indices(tau=tau, J=J)
+        return np.squeeze([self.zvals[idx] for idx in idxs])
+
+    def emission(self, J=0):
+        """Return the radial emission profile [K]."""
+        Tmb = self._calc_Tmb(J=J)
+        weights = (1. - np.exp(-self._calc_ctau(J=J)))
+        weights += 1e-50 * np.random.randn(weights.size).reshape(weights.shape)
+        return np.average(Tmb, weights=weights, axis=0)
 
     # Functions to write the model out to limepy or similar.
 
-    def flatten(self, arr):
-        """Flatten array in way required for limepy."""
-        return arr.swapaxes(1, 2).flatten()
-
-    def write_header(self, filename, clipdens=1e3, resample=1, retvals=False):
+    def write_header(self, filename, mincolumn=None):
         """Write the model to a .h file for LIME."""
 
-        # Broadcast the points.
-        rpntflat = self.rvals[None, None, :] * np.ones(self.dens.shape)
-        zpntflat = self.zvals[None, :, None] * np.ones(self.dens.shape)
-        tpntflat = self.tvals[:, None, None] * np.ones(self.dens.shape)
+        # Flatten all the arrays to save.
+        rpnts = self.rvals[None, :] * np.ones(self.nzpnts)[:, None]
+        zpnts = np.ones(self.nrpnts)[None, :] * self.zvals[:, None]
+        rpnts = rpnts.T.flatten()
+        zpnts = zpnts.T.flatten()
+        dflat = self.dens.T.flatten()
+        tflat = self.temp.T.flatten()
+        aflat = self.abun.T.flatten()
 
-        # Flatten the arrays.
-        rpntflat = self.flatten(rpntflat)
-        zpntflat = self.flatten(zpntflat)
-        tpntflat = self.flatten(tpntflat)
-        densflat = self.flatten(self.dens)
-        tempflat = self.flatten(self.temp)
-        abunflat = self.flatten(self.abun)
-        print('Model has %d points.' % len(rpntflat))
+        # If requested, remove radial points where the CO column density is
+        # too low specified by the 'mincolumn' value.
+        if mincolumn is not None:
+            cflat = self.column[None, :] * np.ones(self.nzpnts)[:, None]
+            disk = cflat.T.flatten() >= mincolumn
+            rpnts = rpnts[disk]
+            zpnts = zpnts[disk]
+            dflat = dflat[disk]
+            tflat = tflat[disk]
+            aflat = aflat[disk]
 
-        # Remove low density points.
-        if clipdens is not None:
-            print('Removing low density points...')
-            mask = np.array([d >= clipdens for d in densflat])
-            rpntflat = rpntflat[mask]
-            zpntflat = zpntflat[mask]
-            tpntflat = tpntflat[mask]
-            densflat = densflat[mask]
-            tempflat = tempflat[mask]
-            abunflat = abunflat[mask]
-            print('%d points remain.' % len(rpntflat))
+        # Remove any points outside the disk.
+        disk = dflat >= self.minH2
+        rpnts = rpnts[disk]
+        zpnts = zpnts[disk]
+        dflat = dflat[disk]
+        tflat = tflat[disk]
+        aflat = aflat[disk]
 
-        # Removing points outside the allowed theta range (-pi, pi).
-        if zpntflat.min() < np.pi:
-            print('Removing theta values less than negative pi.')
-            mask = np.array([t > -np.pi for t in tpntflat])
-            rpntflat = rpntflat[mask]
-            zpntflat = zpntflat[mask]
-            tpntflat = tpntflat[mask]
-            densflat = densflat[mask]
-            tempflat = tempflat[mask]
-            abunflat = abunflat[mask]
-            print('%d points remain.' % len(rpntflat))
+        # Remove any regions with zero or NaN temperatures.
+        disk = np.logical_and(np.isfinite(tflat), tflat > 0.0)
+        rpnts = rpnts[disk]
+        zpnts = zpnts[disk]
+        dflat = dflat[disk]
+        tflat = tflat[disk]
+        aflat = aflat[disk]
 
-        if zpntflat.max() > np.pi:
-            print('Removing theta values less than negative pi.')
-            mask = np.array([t < np.pi for t in tpntflat])
-            rpntflat = rpntflat[mask]
-            zpntflat = zpntflat[mask]
-            tpntflat = tpntflat[mask]
-            densflat = densflat[mask]
-            tempflat = tempflat[mask]
-            abunflat = abunflat[mask]
-            print('%d points remain.' % len(rpntflat))
+        # Remove all points where z or r are negative.
+        disk = np.logical_and(rpnts > 0, zpnts >= 0)
+        rpnts = rpnts[disk]
+        zpnts = zpnts[disk]
+        dflat = dflat[disk]
+        tflat = tflat[disk]
+        aflat = aflat[disk]
 
-        # Resample theta if appropriate.
-        if resample is not None and resample > 1:
-            print('Resample the theta axis...')
-            tokeep = self.tvals[::int(resample)]
-            mask = np.array([t in tokeep for t in tpntflat])
-            rpntflat = rpntflat[mask]
-            zpntflat = zpntflat[mask]
-            tpntflat = tpntflat[mask]
-            densflat = densflat[mask]
-            tempflat = tempflat[mask]
-            abunflat = abunflat[mask]
-            print('%d points remain.' % len(rpntflat))
+        # Change to LIME appropriate units.
+        dflat *= 1e6
 
-        # Convert to LIME specific units.
-        densflat *= 1e6
-
-        # Write to the header file.
-        arrays = [rpntflat, zpntflat, tpntflat, densflat, tempflat, abunflat]
-        anames = ['c1arr', 'c2arr', 'c3arr', 'dens', 'temp', 'abund']
-        string = ''
-        for a, n in zip(arrays, anames):
-            string += self._write_header_string(a, n)
+        # Write the strings to a single file.
+        arrays = np.nan_to_num([rpnts, zpnts, dflat, tflat, aflat])
+        arraynames = ['c1arr', 'c2arr', 'dens', 'temp', 'abund']
+        hstring = ''
+        for array, name in zip(arrays, arraynames):
+            hstring += self._write_header_string(array, name)
         with open('%s.h' % filename.replace('.h', ''), 'w') as hfile:
-            hfile.write('%s' % string)
-        print 'Written to %s.h' % filename.replace('.h', '')
-        if retvals:
-            return np.squeeze(arrays)
+            hfile.write('%s' % hstring)
+        print 'Written to %s.h.' % filename.replace('.h', '')
         return
 
     def _write_header_string(self, array, name):
