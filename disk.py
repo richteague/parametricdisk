@@ -17,7 +17,9 @@ import warnings
 import numpy as np
 import scipy.constants as sc
 from limepy.analysis.collisionalrates import ratefile
+from astropy.convolution import convolve, Box2DKernel
 from scipy.interpolate import griddata
+import matplotlib.pyplot as plt
 warnings.filterwarnings('ignore')
 
 
@@ -41,22 +43,21 @@ class ppd:
         self.rval0 = kwargs.get('rval0', 20.)
         self.rmin = kwargs.get('rmin', 0.)
         self.rmax = kwargs.get('rmax', 6. * self.rval0)
-        self.nrpnts = kwargs.get('nr', 500)
+        self.nr = kwargs.get('nr', 500)
 
         self.zmin = kwargs.get('zmin', 0.)
-        self.zmax = kwargs.get('zmax', 5. * self.rval0)
-        self.nzpnts = kwargs.get('nz', 500)
+        self.zmax = kwargs.get('zmax', 3. * self.rval0)
+        self.nz = kwargs.get('nz', 500)
 
-        self.rvals = np.linspace(self.rmin, self.rmax, self.nrpnts)
-        self.zvals = np.linspace(self.zmin, self.zmax, self.nzpnts)
-        self.rpnts = self.rvals[None, :] * np.ones(self.nzpnts)[:, None]
-        self.zpnts = np.ones(self.nrpnts)[None, :] * self.zvals[:, None]
+        self.rvals = np.linspace(self.rmin, self.rmax, self.nr)
+        self.zvals = np.linspace(self.zmin, self.zmax, self.nz)
+        self.rpnts = self.rvals[None, :] * np.ones(self.nz)[:, None]
+        self.zpnts = np.ones(self.nr)[None, :] * self.zvals[:, None]
 
         self.rvals_m = self.rvals * sc.au
         self.zvals_m = self.zvals * sc.au
         self.rvals_cm = self.rvals_m * 1e2
         self.zvals_cm = self.zvals_m * 1e2
-        self.volume = np.diff(self.rvals_cm)[0] * np.diff(self.zvals_cm)[0]
 
         # System masses. In solar masses.
 
@@ -225,7 +226,7 @@ class ppd:
     def _calc_depletion_profile(self, gaps):
         """Calculates the combined perturbing profile for all gap(s)."""
         if gaps is None:
-            return np.ones(self.nrpnts)
+            return np.ones(self.nr)
         try:
             profile = [self._calc_depletion_gap(gap) for gap in gaps]
             profile = np.product(profile, axis=0)
@@ -240,15 +241,19 @@ class ppd:
         if self.incl_altitude:
             vkep = np.hypot(self.rvals_m[None, :], self.zvals_m[:, None])
         else:
-            vkep = self.rvals_m[None, :] * np.ones(self.nzpnts)[:, None]
+            vkep = self.rvals_m[None, :] * np.ones(self.nz)[:, None]
         vkep = np.power(self.rvals_m, 2)[None, :] * np.power(vkep, -3)
         vkep *= sc.G * self.mstar * self.msun
 
         # Disk gravity component.
         if self.incl_diskmass:
-            potential = self._calc_gravitational_potential()
-            potential = np.gradient(potential, self.rvals_m, axis=1)
-            vgrav = self.rvals_m[None, :] * potential
+            if type(self.incl_diskmass) is not bool:
+                N = self.incl_diskmass
+            else:
+                N = 10
+            self.phi = self._calc_gravitational_potential(N)
+            dphidr = np.gradient(self.phi, self.rvals_m, axis=1)
+            vgrav = self.rvals_m[None, :] * dphidr
             vgrav = np.where(np.isfinite(vgrav), vgrav, 0.0)
         else:
             vgrav = 0.0
@@ -278,35 +283,59 @@ class ppd:
         mdisk = np.trapz(sigma * self.rvals_cm, self.rvals_cm)
         return 2. * np.pi * mdisk / 1e3 / self.msun
 
-    def _calc_gravitational_potential(self, N=10):
+    def _calc_gravitational_potential(self, N=5):
         """Calculate the gravitational potential [m^2/s^2]."""
 
-        # Need to first reflect the density field.
-        rgrid, zgrid = self.rvals_m, self.zvals_m
-        zgrid = np.concatenate([-zgrid[::-1], zgrid])
-        cmass = np.vstack([np.flipud(self.dens), self.dens])
-        cmass *= self.volume * self.mu * sc.m_p
-        rpnts, zpnts = np.meshgrid(rgrid, zgrid)
+        # Build new axes as we need to solve this in 3D.
+        # Grid is in units of [m].
 
-        # Downsample the grid to make it computationally feasible.
-        rgrid, zgrid = rgrid[::N], zgrid[::N]
-        potential = np.zeros((zgrid.size, rgrid.size))
+        xvals = np.linspace(-self.rmax, self.rmax, int(self.nr / 5)) * sc.au
+        yvals = np.linspace(-self.rmax, self.rmax, int(self.nr / 5)) * sc.au
+        zvals = np.linspace(-self.zmax, self.zmax, int(self.nz / 5)) * sc.au
 
-        # Cycle through each grid cell and calculate the potential.
-        for zidx, alt in enumerate(zgrid):
-            for ridx, rad in enumerate(rgrid):
-                dist = np.hypot(rpnts - rad, zpnts - alt)
-                dist = np.where(dist == 0.0, 1e50, dist)
-                star = self.mstar * self.msun / np.hypot(alt, rad)
-                potential[zidx, ridx] = np.nansum(cmass / dist) + star
+        cell_volume = np.diff(xvals)[0]**2 * np.diff(zvals)[0] * 1e6
+        grid_shape = (zvals.size, yvals.size, xvals.size)
+        xvals = xvals[None, None, :] * np.ones(grid_shape)
+        yvals = yvals[None, :, None] * np.ones(grid_shape)
+        zvals = zvals[:, None, None] * np.ones(grid_shape)
+        rvals = np.hypot(xvals, yvals)
 
-        # Linearlly interpolate the data back to full size.
-        rpnts, zpnts = np.meshgrid(rgrid / sc.au, zgrid / sc.au)
-        rpnts, zpnts = rpnts.flatten(), zpnts.flatten()
-        potential = griddata((rpnts, zpnts), potential.flatten(),
-                             (self.rvals[None, :], self.zvals[:, None]),
-                             fill_value=0.0)
-        return -sc.G * potential
+        # Interpolate the mass points onto the disk.
+
+        mass = (self.dens * cell_volume * self.mu * sc.m_p).flatten()
+        mass = griddata((self.rpnts.flatten(), self.zpnts.flatten()), mass,
+                        (rvals.flatten() / sc.au,
+                         abs(zvals).flatten() / sc.au),
+                        method='linear').reshape(rvals.shape)
+
+        fig, ax = plt.subplots()
+        im = ax.contourf(np.unique(xvals) / sc.au, np.unique(zvals) / sc.au,
+                         np.log10(mass[:, int(2 * grid_shape[1] / 3)]), 30)
+        plt.colorbar(im)
+
+        # Loop through the points.
+
+        r_sample, z_sample = self.rvals_m[::N], self.zvals_m[::N]
+        potential = np.zeros((z_sample.size, r_sample.size))
+
+        for zidx, alt in enumerate(z_sample):
+            for ridx, rad in enumerate(r_sample):
+                dx = np.power(xvals - rad, 2.0)
+                dy = np.power(yvals, 2.0)
+                dz = np.power(zvals - alt, 2.0)
+                dr = np.sqrt(dx + dy + dz)
+                dr = np.where(dr == 0.0, 1e50, dr)
+                potential[zidx, ridx] = -sc.G * np.nansum(mass / dr)
+
+        if N > 1:
+            rpnts, zpnts = np.meshgrid(r_sample / sc.au, z_sample / sc.au)
+            rpnts, zpnts = rpnts.flatten(), zpnts.flatten()
+            potential = griddata((rpnts, zpnts), potential.flatten(),
+                                 (self.rvals[None, :], self.zvals[:, None]),
+                                 fill_value=0.0)
+            kernel = Box2DKernel(2*N)
+            potential = convolve(potential, kernel, boundary='extend')
+        return potential
 
     def radialpowerlaw(self, x0, q):
         """Radial power law."""
@@ -437,7 +466,7 @@ class ppd:
     def _make_profile(self, value):
         """Make the input into a radial profile."""
         if type(value) in [float, np.float32, np.float64, np.float128]:
-            return np.array([value for _ in range(self.nrpnts)])
+            return np.array([value for _ in range(self.nr)])
         return self._sample_input(value)
 
     # Functions to do simple radiative transfer.
@@ -485,7 +514,7 @@ class ppd:
     def _get_tau_indices(self, tau=1.0, J=0):
         """Return the indices of the tau surface."""
         ctau = self._calc_ctau(J=J)
-        idx = np.argmin(abs(ctau - np.ones(self.nrpnts) * tau), axis=0)
+        idx = np.argmin(abs(ctau - np.ones(self.nr) * tau), axis=0)
         return np.where(ctau[0] > tau, idx, 0)
 
     def tau_emission(self, tau=1.0, J=0):
@@ -501,20 +530,20 @@ class ppd:
 
     def tau_surface(self, tau=1.0, J=0):
         """Return the height of the tau surface [au]."""
-        idxs = self._get_tau_indices(tau=tau, J=J)
-        return np.squeeze([self.zvals[idx] for idx in idxs])
+        return np.take(self.zvals, self._get_tau_indices(tau=tau, J=J))
 
     def tau_rotation(self, tau=1.0, J=0):
         """Return the rotation velocity at the tau surface [m/s]."""
-        idx = self._get_tau_indices(tau=tau, J=J)
-        return idx
+        idxs = self._get_tau_indices(tau=tau, J=J)
+        vrot = [self.rotation[idx, i] for i, idx in enumerate(idxs)]
+        return np.squeeze(vrot)
 
     def avg_emission(self, J=0):
         """Return the radial emission profile [K]."""
         Tmb = self._calc_Tmb(J=J)
         tau = (1. - np.exp(-self._calc_ctau(J=J)))
         tau += 1e-50 * np.random.randn(tau.size).reshape(tau.shape)
-        Tb = [self._wpcnts(Tmb[:, i], tau[:, i]) for i in range(self.nrpnts)]
+        Tb = [self._wpcnts(Tmb[:, i], tau[:, i]) for i in range(self.nr)]
         return np.squeeze(Tb).T
 
     def _wpcnts(self, data, weights, percentiles=[0.16, 0.5, 0.84]):
@@ -544,9 +573,9 @@ class ppd:
     def write_header(self, filename, minN=0.0, minH2=0.0):
         """Write the model to a .h file for LIME."""
 
-        rpnts = self.rvals[None, :] * np.ones(self.nzpnts)[:, None]
-        zpnts = np.ones(self.nrpnts)[None, :] * self.zvals[:, None]
-        Npnts = self.column[None, :] * np.ones(self.nzpnts)[:, None]
+        rpnts = self.rvals[None, :] * np.ones(self.nz)[:, None]
+        zpnts = np.ones(self.nr)[None, :] * self.zvals[:, None]
+        Npnts = self.column[None, :] * np.ones(self.nz)[:, None]
         rpnts = rpnts.T.flatten()
         zpnts = zpnts.T.flatten()
         Npnts = Npnts.T.flatten()
