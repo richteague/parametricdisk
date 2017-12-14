@@ -17,9 +17,7 @@ import warnings
 import numpy as np
 import scipy.constants as sc
 from limepy.analysis.collisionalrates import ratefile
-from astropy.convolution import convolve, Box2DKernel
 from scipy.interpolate import griddata
-import matplotlib.pyplot as plt
 warnings.filterwarnings('ignore')
 
 
@@ -84,7 +82,6 @@ class ppd:
         # density at the gap center. If gaps are specified, `mdisk` will be
         # recalculated.
         #
-        # TODO: count the number of gaps.
         # TODO: allow the disk mass to remain constant after gaps are added.
 
         self.sigm0 = kwargs.get('sigm0', 15.)
@@ -98,7 +95,7 @@ class ppd:
             q = (2. - self.sigmq)
             self.sigm0 = self.mdisk * q * self.msun * 1e3
             self.sigm0 /= 2. * np.pi * np.power(self.rval0 * sc.au * 1e2, 2)
-            self.sigm0 /= np.exp(np.power(self.rvals[0] / self.rval0, q))
+            self.sigm0 *= np.exp(np.power(self.rvals[0] / self.rval0, q))
             self.sigma = self._calc_surfacedensity()
         else:
             q = (2. - self.sigmq)
@@ -138,7 +135,7 @@ class ppd:
 
         self.Hdns0 = kwargs.get('Hdns0', None)
         self.Hdnsq = kwargs.get('Hdnsq', None)
-        self.minH2 = kwargs.get('minH2', 1.e4)
+        self.minH2 = kwargs.get('minH2', 1.e3)
 
         flag = False
         if self.Htmp0 is not None and self.Htmpq is not None:
@@ -289,9 +286,9 @@ class ppd:
         # Build new axes as we need to solve this in 3D.
         # Grid is in units of [m].
 
-        xvals = np.linspace(-self.rmax, self.rmax, int(self.nr / 5)) * sc.au
-        yvals = np.linspace(-self.rmax, self.rmax, int(self.nr / 5)) * sc.au
-        zvals = np.linspace(-self.zmax, self.zmax, int(self.nz / 5)) * sc.au
+        xvals = np.linspace(-self.rmax, self.rmax, int(self.nr / 10)) * sc.au
+        yvals = np.linspace(-self.rmax, self.rmax, int(self.nr / 10)) * sc.au
+        zvals = np.linspace(-self.zmax, self.zmax, int(self.nz / 10)) * sc.au
 
         cell_volume = np.diff(xvals)[0]**2 * np.diff(zvals)[0] * 1e6
         grid_shape = (zvals.size, yvals.size, xvals.size)
@@ -308,11 +305,6 @@ class ppd:
                          abs(zvals).flatten() / sc.au),
                         method='linear').reshape(rvals.shape)
 
-        fig, ax = plt.subplots()
-        im = ax.contourf(np.unique(xvals) / sc.au, np.unique(zvals) / sc.au,
-                         np.log10(mass[:, int(2 * grid_shape[1] / 3)]), 30)
-        plt.colorbar(im)
-
         # Loop through the points.
 
         r_sample, z_sample = self.rvals_m[::N], self.zvals_m[::N]
@@ -328,13 +320,21 @@ class ppd:
                 potential[zidx, ridx] = -sc.G * np.nansum(mass / dr)
 
         if N > 1:
+
+            # Linearly interpolate the potential. For the gridding we use both
+            # linear and nearest methods to account for the regions near the
+            # edge of the grid.
+
             rpnts, zpnts = np.meshgrid(r_sample / sc.au, z_sample / sc.au)
             rpnts, zpnts = rpnts.flatten(), zpnts.flatten()
-            potential = griddata((rpnts, zpnts), potential.flatten(),
-                                 (self.rvals[None, :], self.zvals[:, None]),
-                                 fill_value=0.0)
-            kernel = Box2DKernel(2*N)
-            potential = convolve(potential, kernel, boundary='extend')
+            linear = griddata((rpnts, zpnts), potential.flatten(),
+                              (self.rvals[None, :], self.zvals[:, None]),
+                              method='cubic', fill_value=np.nan)
+            nearest = griddata((rpnts, zpnts), potential.flatten(),
+                               (self.rvals[None, :], self.zvals[:, None]),
+                               method='nearest')
+            potential = np.where(np.isfinite(linear), linear, nearest)
+
         return potential
 
     def radialpowerlaw(self, x0, q):
@@ -471,80 +471,99 @@ class ppd:
 
     # Functions to do simple radiative transfer.
 
-    def _calc_Nu(self, J=0):
-        """Return the column density in each cell of that level [/cm^2]."""
-        Eu = self.rates.lines[J+1].Eup
-        gu = self.rates.levels[J+2].g
-        abun = gu * self.abun * self.dens / self._calc_Qrot(self.temp)
-        dz = np.diff(self.zvals_cm)
-        dz = np.insert(dz, 0, dz[0])
-        return abun * np.exp(-Eu / self.temp) * dz[:, None]
-
-    def _calc_dV(self):
-        """Return the Doppler width of the line at each cell."""
-        vtherm = np.sqrt(2. * sc.k * self.temp / self.rates.mu / sc.m_p)
-        return np.hypot(vtherm, self.vturb)
-
-    def _calc_FWHM(self):
+    def _calc_phi(self):
         """Return the FWHM of the line at each cell."""
-        return 2. * np.sqrt(np.log(2.)) * self._calc_dV()
-
-    def _calc_tau(self, J=0):
-        """Return the optical depth of each cell for the given transition."""
-        Nu = self._calc_Nu(J=J) * 1e4
-        FWHM = self._calc_FWHM()
-        Au = self.rates.lines[J+1].A
-        nu = self.rates.lines[J+1].freq
-        tau = Nu * Au * sc.c**3 / 8. / np.pi / nu**3 / FWHM
-        return tau * (np.exp(sc.h * nu / sc.k / self.temp) - 1.)
-
-    def _calc_ctau(self, J=0):
-        """Return (1 - exp(-tau)) for each cell."""
-        tau = self._calc_tau(J=J)
-        return np.cumsum(tau[::-1], axis=0)[::-1]
-
-    def _calc_Tmb(self, J=0):
-        """Return the observed main beam temperature [K]."""
-        return self.temp * (1. - np.exp(-self._calc_ctau(J=J)))
+        dV = 2. * sc.k * self.temp / self.rates.mu / sc.m_p
+        dV = np.sqrt(dV + self.vturb**2)
+        return 2. * np.sqrt(np.log(2.)) * dV
 
     def _calc_Qrot(self, T):
         """Rotational parition function."""
         return sc.k * T / sc.h / self.B0 + 1. / 3.
 
-    def _get_tau_indices(self, tau=1.0, J=0):
-        """Return the indices of the tau surface."""
-        ctau = self._calc_ctau(J=J)
-        idx = np.argmin(abs(ctau - np.ones(self.nr) * tau), axis=0)
-        return np.where(ctau[0] > tau, idx, 0)
+    def _level_population(self, J=0):
+        """Return the densities of the provided level."""
+        n = self.dens * self.abun
+        n *= self.rates.levels[J+1].g / self._calc_Qrot(self.temp)
+        return n / np.exp(self.rates.lines[J+1].Eup / self.temp)
 
-    def tau_emission(self, tau=1.0, J=0):
-        """Return emission profile at the surface where tau is reached [K]."""
-        Tmb = self._calc_Tmb(J=J)
-        idxs = self._get_tau_indices(tau=tau, J=J)
-        return np.squeeze([Tmb[idx, i] for i, idx in enumerate(idxs)])
+    def _absorption_coefficient(self, J=0):
+        """Return the asborption coefficient for the (J+1 - J) level."""
+        n1 = self._level_population(J)
+        g2 = self.rates.levels[J+2].g
+        g1 = self.rates.levels[J+1].g
+        A21 = self.rates.lines[J+1].A
+        nu = self.rates.lines[J+1].freq
+        phi = self._calc_phi()
+        alpha = A21 * sc.c**2 * n1 * g2 * phi / 8. / np.pi / nu**2 / g1
+        return alpha * (1. - np.exp(-sc.h * nu / sc.k / self.temp))
 
-    def tau_temperature(self, tau=1.0, J=0):
-        """Return the temperature at the tau surface [K]."""
-        idxs = self._get_tau_indices(tau=tau, J=J)
-        return np.squeeze([self.temp[idx, i] for i, idx in enumerate(idxs)])
+    def _calc_tau(self, J=0):
+        """Return the integrated optical depth of each cell."""
+        alpha = self._absorption_coefficient(J)
+        dz = np.diff(self.zvals_cm)
+        dz = np.insert(dz, 0, dz[0])
+        return alpha * dz
 
-    def tau_surface(self, tau=1.0, J=0):
-        """Return the height of the tau surface [au]."""
-        return np.take(self.zvals, self._get_tau_indices(tau=tau, J=J))
+    def _calc_source_function(self, J=0):
+        """Calculate the source function for each cell."""
+        nu = self.rates.lines[J+1].freq
+        Snu = 2. * sc.h * nu**3 / sc.c**2
+        return Snu / (np.exp(sc.h * nu / sc.k / self.temp) - 1.)
 
-    def tau_rotation(self, tau=1.0, J=0):
-        """Return the rotation velocity at the tau surface [m/s]."""
-        idxs = self._get_tau_indices(tau=tau, J=J)
-        vrot = [self.rotation[idx, i] for i, idx in enumerate(idxs)]
-        return np.squeeze(vrot)
+    def _calc_intensity_weights(self, J=0):
+        """Emission weights for each cell."""
 
-    def avg_emission(self, J=0):
-        """Return the radial emission profile [K]."""
-        Tmb = self._calc_Tmb(J=J)
-        tau = (1. - np.exp(-self._calc_ctau(J=J)))
-        tau += 1e-50 * np.random.randn(tau.size).reshape(tau.shape)
-        Tb = [self._wpcnts(Tmb[:, i], tau[:, i]) for i in range(self.nr)]
-        return np.squeeze(Tb).T
+        Snu = self._calc_source_function(J)
+        tau = self._calc_tau(J)
+
+        zidx = int(self.zmin == 0.0)
+        tau = np.vstack([np.flipud(tau[zidx:]), tau])
+        Snu = np.vstack([np.flipud(Snu[zidx:]), Snu])
+        ctau = np.cumsum(tau[::-1], axis=0)[::-1]
+
+        intensity = Snu * (1. - np.exp(-tau)) * np.exp(-ctau)
+        intensity /= np.nansum(intensity, axis=0)[None, :]
+        return np.where(np.log(intensity) < -20., 0.0, intensity)
+
+    def _calc_weighted_parameter(self, param, J=0, absolute=False):
+        """Return the weighted of the parameter."""
+
+        zidx = int(self.zmin == 0.0)
+        if param.shape == self.dens.shape:
+            param = np.vstack([np.flipud(param[zidx:]), param])
+        elif param.shape == self.zvals.shape:
+            param = param[:, None] * np.ones((self.nz, self.nr))
+            param = np.vstack([-np.flipud(param[zidx:]), param])
+        else:
+            raise ValueError("Unknown shape for 'param'.")
+        if absolute:
+            param = abs(param)
+
+        weights = self._calc_intensity_weights(J)
+        if weights.shape[0] != param.shape[0]:
+            raise ValueError("Mirroring did not work.")
+
+        pcnts = np.zeros((self.nr, 3))
+        for ridx in range(self.nr):
+            pcnts[ridx] = self._wpcnts(param[:, ridx], weights[:, ridx])
+        return pcnts.T
+
+    def emission_temperature(self, J=0):
+        """Return the temperature traced by emission."""
+        return self._calc_weighted_parameter(self.temp, J)
+
+    def emission_rotation(self, J=0):
+        """Return the rotation traced by emission."""
+        return self._calc_weighted_parameter(self.rotation, J)
+
+    def emission_height(self, J=0, absolute=True):
+        """Return the rotation traced by emission."""
+        return self._calc_weighted_parameter(self.zvals, J, absolute)
+
+    def emission_density(self, J=0):
+        """Return the rotation traced by emission."""
+        return self._calc_weighted_parameter(self.dens, J)
 
     def _wpcnts(self, data, weights, percentiles=[0.16, 0.5, 0.84]):
         '''Weighted percentiles.'''
