@@ -205,7 +205,9 @@ class ppd:
 
     def _square_gap(self, gap):
         """Return a square edged gap."""
-        return np.where(abs(self.rvals - gap[0]) / 2.0 < gap[1], gap[2], 1.)
+        depth = (1. - gap[2]**-1)
+        gap = np.where(abs(self.rvals - gap[0]) < gap[1] * 0.5, depth, 0.)
+        return 1. - gap
 
     def _duffell_gap(self, gap):
         """Return a gap with profile described in Duffel (2015)."""
@@ -468,6 +470,29 @@ class ppd:
         if type(value) in [float, np.float32, np.float64, np.float128]:
             return np.array([value for _ in range(self.nr)])
         return self._sample_input(value)
+
+    def new_molecule(self, xgas=None, xdep=None, molecule=None, column=None,
+                     ndiss=None, tfreeze=None):
+        """Redefine the molecular abundance without recalculating density."""
+        if molecule is not None:
+            molecule = molecule.lower()
+            self.molecule = molecule
+            self.rates = ratefile('%s%s.dat' % (self.rates_path, molecule))
+        if xgas is not None:
+            self.xgas = self._make_profile(xgas)
+        if xdep is not None:
+            self.xdep = self._make_profile(xdep)
+        if column is None:
+            self.column = None
+        else:
+            self.column = self._make_profile(column)
+        if tfreeze is not None:
+            self.tfreeze = tfreeze
+        if ndiss is not None:
+            self.ndiss = ndiss
+        self.abun = self._calc_abundance()
+        self.column = self._calc_columndensity()
+        return
 
     # Functions to do simple radiative transfer.
 
